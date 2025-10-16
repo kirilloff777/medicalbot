@@ -29,7 +29,6 @@ from telegram.ext import (
 
 # БЕЗОПАСНОЕ получение токена из переменных окружения
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
 
 # Проверка наличия обязательных переменных
 if not BOT_TOKEN:
@@ -38,14 +37,6 @@ if not BOT_TOKEN:
         "Добавьте его в Secrets (🔒 иконка замка слева):\n"
         "Key: BOT_TOKEN\n"
         "Value: ваш токен от @BotFather"
-    )
-
-if ADMIN_ID == 0:
-    raise ValueError(
-        "❌ ADMIN_ID не найден!\n"
-        "Добавьте его в Secrets:\n"
-        "Key: ADMIN_ID\n"
-        "Value: ваш Telegram ID от @userinfobot"
     )
 
 # Часовой пояс
