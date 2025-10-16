@@ -27,16 +27,24 @@ from telegram.ext import (
 
 # ============= КОНФИГУРАЦИЯ =============
 
-# БЕЗОПАСНОЕ получение токена из переменных окружения
+# Токен из GitHub Secrets
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 
-# Проверка наличия обязательных переменных
+# Пробуем получить ADMIN_ID из GitHub Secrets
+admin_id_env = os.environ.get('ADMIN_ID')
+
+# Если переменная отсутствует — используем запасной ID (например, твой)
+# 👇 замените 55948371 на свой реальный Telegram ID
+ADMIN_ID = int(admin_id_env) if admin_id_env and admin_id_env.isdigit() else 55948371
+
+# Проверка токена
 if not BOT_TOKEN:
     raise ValueError(
         "❌ BOT_TOKEN не найден!\n"
-        "Добавьте его в Secrets (🔒 иконка замка слева):\n"
-        "Key: BOT_TOKEN\n"
-        "Value: ваш токен от @BotFather"
+        "Добавьте его в GitHub Secrets:\n"
+        "Settings → Secrets and variables → Actions → New secret\n"
+        "Name: BOT_TOKEN\n"
+        "Value: токен от @BotFather"
     )
 
 # Часовой пояс
