@@ -27,39 +27,32 @@ from telegram.ext import (
 
 # ============= КОНФИГУРАЦИЯ =============
 
-# ============= КОНФИГУРАЦИЯ =============
+# БЕЗОПАСНОЕ получение токена из переменных окружения
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
 
-# Импорт настроек из config.py
-try:
-    from config import BOT_TOKEN, ADMIN_ID, TIMEZONE_NAME, DATABASE_NAME
-except ImportError:
-    raise ImportError(
-        "❌ Файл config.py не найден!\n\n"
-        "Инструкция по настройке:\n"
-        "1. Скопируйте config.example.py в config.py\n"
-        "2. Откройте config.py и заполните:\n"
-        "   - BOT_TOKEN (получите у @BotFather)\n"
-        "   - ADMIN_ID (получите у @userinfobot)\n\n"
-        "Подробнее см. SETUP.md"
-    )
-
-# Проверка наличия обязательных настроек
-if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+# Проверка наличия обязательных переменных
+if not BOT_TOKEN:
     raise ValueError(
-        "❌ BOT_TOKEN не настроен!\n\n"
-        "Откройте config.py и вставьте токен от @BotFather\n"
-        "Пример: BOT_TOKEN = \"1234567890:ABCdef...\"\n\n"
-        "Подробнее см. SETUP.md"
+        "❌ BOT_TOKEN не найден!\n"
+        "Добавьте его в Secrets (🔒 иконка замка слева):\n"
+        "Key: BOT_TOKEN\n"
+        "Value: ваш токен от @BotFather"
     )
 
-if not ADMIN_ID or ADMIN_ID == 0:
+if ADMIN_ID == 0:
     raise ValueError(
-        "❌ ADMIN_ID не настроен!\n\n"
-        "Откройте config.py и вставьте ваш Telegram ID\n"
-        "Получите ID у @userinfobot\n"
-        "Пример: ADMIN_ID = 123456789\n\n"
-        "Подробнее см. SETUP.md"
+        "❌ ADMIN_ID не найден!\n"
+        "Добавьте его в Secrets:\n"
+        "Key: ADMIN_ID\n"
+        "Value: ваш Telegram ID от @userinfobot"
     )
+
+# Часовой пояс
+TIMEZONE = pytz.timezone('Europe/Moscow')
+
+# База данных
+DATABASE_NAME = 'medications.db'
 
 # Обращения
 NICKNAMES = ["Солнышко", "Мышка", "Котёнок", "Любимая", "Ксюшенька"]
