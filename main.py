@@ -290,18 +290,18 @@ def get_or_create_user(telegram_id: int, name: str = None) -> int:
     try:
         with get_db() as conn:
             c = conn.cursor()
-
+            
+            # Используем INSERT OR IGNORE для предотвращения race condition
+            is_authorized = 1 if telegram_id == ADMIN_ID else 0
+            c.execute('''INSERT OR IGNORE INTO users 
+                         (telegram_id, name, authorized) 
+                         VALUES (?, ?, ?)''', 
+                      (telegram_id, name, is_authorized))
+            
+            # Теперь безопасно получаем ID
             c.execute('SELECT id FROM users WHERE telegram_id = ?', (telegram_id,))
             result = c.fetchone()
-
-            if result:
-                return result['id']
-            else:
-                # Админ автоматически авторизован
-                is_authorized = 1 if telegram_id == ADMIN_ID else 0
-                c.execute('INSERT INTO users (telegram_id, name, authorized) VALUES (?, ?, ?)', 
-                          (telegram_id, name, is_authorized))
-                return c.lastrowid
+            return result['id']
     except Exception as e:
         logger.error(f"❌ Ошибка get_or_create_user: {e}")
         raise
@@ -460,16 +460,18 @@ def update_medication(medication_id: int, **kwargs):
         'schedule_type', 'weekdays', 'has_dosage_scheme'
     }
 
-    for key in kwargs.keys():
-        if key not in ALLOWED_FIELDS:
-            raise ValueError(f"Invalid field name: {key}")
+    # Фильтруем только разрешенные поля
+    safe_kwargs = {k: v for k, v in kwargs.items() if k in ALLOWED_FIELDS}
+    
+    if not safe_kwargs:
+        raise ValueError("No valid fields to update")
 
     try:
         with get_db() as conn:
             c = conn.cursor()
 
-            fields = ', '.join([f"{k} = ?" for k in kwargs.keys()])
-            values = list(kwargs.values()) + [medication_id]
+            fields = ', '.join([f"{k} = ?" for k in safe_kwargs.keys()])
+            values = list(safe_kwargs.values()) + [medication_id]
 
             c.execute(f'UPDATE medications SET {fields} WHERE id = ?', values)
     except Exception as e:
@@ -1219,7 +1221,15 @@ async def show_current_medications(update: Update, context: ContextTypes.DEFAULT
         text += f"📅 Начало: {start.strftime('%d.%m.%Y')}\n"
         text += f"⏳ Принято: {days_passed} из {med['duration_days']} дней\n"
         text += f"📆 Осталось: {days_left} дней\n"
-        text += f"🏁 Окончание: {end.strftime('%d.%m.%Y')}\n\n"
+        text += f"🏁 Окончание: {end.strftime('%d.%m.%Y')}\n"
+        
+        # Добавляем время приёмов
+        schedules = get_medication_schedules(med['id'])
+        if schedules:
+            times_str = ", ".join([f"{PERIODS.get(s['period'], '⏰')} {s['time']}" for s in schedules])
+            text += f"⏰ Время: {times_str}\n"
+        
+        text += "\n"
 
         keyboard.append([InlineKeyboardButton(f"📋 {med['name']}", callback_data=f"med_detail_{med['id']}")])
 
@@ -2074,14 +2084,15 @@ async def confirm_medication(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     except Exception as e:
         logger.error(f"❌ Ошибка создания лекарства: {e}")
+        # НЕ очищаем context.user_data, чтобы пользователь мог повторить попытку
         await query.message.edit_text(
             "❌ Произошла ошибка при сохранении. Попробуйте снова.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Попробовать снова", callback_data="add_medication")
+                InlineKeyboardButton("🔄 Попробовать снова", callback_data="confirm_yes"),
+                InlineKeyboardButton("❌ Отмена", callback_data="cancel_add_med")
             ]])
         )
-        context.user_data.clear()
-        return ConversationHandler.END
+        return ADD_MED_CONFIRM
 
     # Успешно создано
     keyboard = [
@@ -2967,6 +2978,13 @@ async def complete_course(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     medication_id = int(query.data.split('_')[1])
     med = get_medication_by_id(medication_id)
+    
+    if not med:
+        await query.message.edit_text(
+            "❌ Лекарство не найдено.",
+            parse_mode='HTML'
+        )
+        return
 
     keyboard = [
         [InlineKeyboardButton("✅ Да, завершить", callback_data=f"complete_confirm_{medication_id}")],
@@ -3014,6 +3032,13 @@ async def delete_medication(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     medication_id = int(query.data.split('_')[1])
     med = get_medication_by_id(medication_id)
+    
+    if not med:
+        await query.message.edit_text(
+            "❌ Лекарство не найдено.",
+            parse_mode='HTML'
+        )
+        return
 
     keyboard = [
         [InlineKeyboardButton("✅ Да, удалить", callback_data=f"delete_confirm_{medication_id}")],
@@ -3159,6 +3184,9 @@ async def send_medication_reminder(context: ContextTypes.DEFAULT_TYPE):
             should_send = True
         elif schedule_type == 'every_other':
             med = get_medication_by_id(med_id)
+            if not med:
+                continue  # Лекарство было удалено, пропускаем
+            
             start_date = datetime.strptime(med['start_date'], '%Y-%m-%d').date()
             end_date = datetime.strptime(med['end_date'], '%Y-%m-%d').date()
 
@@ -3174,6 +3202,18 @@ async def send_medication_reminder(context: ContextTypes.DEFAULT_TYPE):
                 should_send = current_weekday in weekdays_list
 
         if should_send:
+            # Проверяем, не было ли уже напоминания в последние 5 минут
+            with get_db() as check_conn:
+                check_c = check_conn.cursor()
+                five_min_ago = (now - timedelta(minutes=5)).isoformat()
+                check_c.execute('''SELECT COUNT(*) as count FROM medication_logs 
+                                  WHERE medication_id = ? AND schedule_id = ? 
+                                  AND scheduled_date = ? AND created_at > ?''',
+                              (med_id, sched_id, current_date.isoformat(), five_min_ago))
+                
+                if check_c.fetchone()['count'] > 0:
+                    continue  # Пропускаем, уже было напоминание
+            
             # Отправляем напоминание
             greeting = get_greeting_by_time()
             nickname = get_random_nickname()
@@ -3205,6 +3245,15 @@ async def handle_taken(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scheduled_date = datetime.strptime(parts[3], '%Y-%m-%d').date()
 
     med = get_medication_by_id(med_id)
+    
+    # Проверяем, что лекарство активно
+    if not med or not med['is_active']:
+        await query.message.edit_text(
+            "❌ Это лекарство больше не активно.",
+            parse_mode='HTML'
+        )
+        return
+    
     schedules = get_medication_schedules(med_id)
     sched = next((s for s in schedules if s['id'] == sched_id), None)
 
@@ -3238,6 +3287,14 @@ async def handle_postpone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reminder_interval = int(parts[4])
 
     med = get_medication_by_id(med_id)
+    
+    # Проверяем, что лекарство активно
+    if not med or not med['is_active']:
+        await query.message.edit_text(
+            "❌ Это лекарство больше не активно.",
+            parse_mode='HTML'
+        )
+        return
 
     if med:
         now = datetime.now(TIMEZONE)
@@ -3305,6 +3362,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin_users")],
         [InlineKeyboardButton("📊 Общая статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("📨 Отправить сообщение", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("💾 Скачать базу данных", callback_data="admin_download_db")],
         [InlineKeyboardButton("🔙 Закрыть", callback_data="admin_close")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3414,6 +3472,42 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
     return ConversationHandler.END
+
+async def admin_download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить файл базы данных админу"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id != ADMIN_ID:
+        await query.answer("❌ У вас нет доступа к этой функции", show_alert=True)
+        return
+    
+    try:
+        await query.message.edit_text("📦 Подготавливаю базу данных...")
+        
+        with open(DATABASE_NAME, 'rb') as db_file:
+            await context.bot.send_document(
+                chat_id=ADMIN_ID,
+                document=db_file,
+                filename=DATABASE_NAME,
+                caption=f"💾 <b>База данных medications.db</b>\n\n📅 Создано: {datetime.now(TIMEZONE).strftime('%d.%m.%Y %H:%M')}",
+                parse_mode='HTML'
+            )
+        
+        await query.message.edit_text(
+            "✅ База данных успешно отправлена!",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")
+            ]])
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки базы данных: {e}")
+        await query.message.edit_text(
+            f"❌ Ошибка при отправке базы данных: {e}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="admin_panel")
+            ]])
+        )
 
 async def admin_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Закрыть админ-панель"""
@@ -3622,6 +3716,8 @@ async def handle_callback_queries(update: Update, context: ContextTypes.DEFAULT_
         await admin_stats(update, context)
     elif data == "admin_broadcast":
         return await admin_broadcast_start(update, context)
+    elif data == "admin_download_db":
+        await admin_download_db(update, context)
     elif data == "admin_close":
         await admin_close(update, context)
 
