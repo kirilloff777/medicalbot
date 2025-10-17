@@ -303,7 +303,7 @@ def init_database():
     logger.info("✅ База данных инициализирована")
 
 # Функции работы с пользователями
-def get_or_create_user(telegram_id: int, name: str = None) -> int:
+def get_or_create_user(telegram_id: int, name: Optional[str] = None) -> int:
     """Получает ID пользователя или создаёт нового"""
     try:
         with get_db() as conn:
@@ -404,7 +404,7 @@ def get_all_users() -> List[Dict]:
 # Функции работы с лекарствами
 def create_medication(user_id: int, name: str, duration_days: int, 
                      start_date: date, schedule_type: str = 'daily',
-                     weekdays: str = None, has_dosage_scheme: bool = False) -> int:
+                     weekdays: Optional[str] = None, has_dosage_scheme: bool = False) -> int:
     """Создаёт новое лекарство"""
     try:
         with get_db() as conn:
@@ -420,6 +420,8 @@ def create_medication(user_id: int, name: str, duration_days: int,
                        end_date.isoformat(), schedule_type, weekdays, has_dosage_scheme))
 
             medication_id = c.lastrowid
+            if medication_id is None:
+                raise ValueError("Failed to create medication")
             return medication_id
     except Exception as e:
         logger.error(f"Error creating medication: {e}")
@@ -542,7 +544,10 @@ def create_schedule(medication_id: int, time_str: str, period: str,
                          VALUES (?, ?, ?, ?)''',
                       (medication_id, time_str, period, reminder_interval))
 
-            return c.lastrowid
+            schedule_id = c.lastrowid
+            if schedule_id is None:
+                raise ValueError("Failed to create schedule")
+            return schedule_id
     except Exception as e:
         logger.error(f"❌ Ошибка create_schedule: {e}")
         raise
@@ -814,13 +819,27 @@ def create_active_reminder(medication_id: int, schedule_id: int, user_telegram_i
             c = conn.cursor()
             now = datetime.now(TIMEZONE)
             
-            # Используем INSERT OR IGNORE чтобы избежать дубликатов
-            c.execute('''INSERT OR IGNORE INTO active_reminders 
+            # ✅ ИСПРАВЛЕНО: Сначала проверяем существование
+            c.execute('''SELECT id FROM active_reminders 
+                         WHERE medication_id = ? AND schedule_id = ? AND scheduled_date = ?''',
+                      (medication_id, schedule_id, scheduled_date.isoformat()))
+            
+            existing = c.fetchone()
+            
+            if existing:
+                logger.warning(f"⚠️ Активное напоминание уже существует: med={medication_id}, sched={schedule_id}, date={scheduled_date}")
+                return
+            
+            # Создаём новое
+            c.execute('''INSERT INTO active_reminders 
                          (medication_id, schedule_id, user_telegram_id, scheduled_date,
                           first_reminder_time, last_reminder_time, reminder_count)
                          VALUES (?, ?, ?, ?, ?, ?, 1)''',
                       (medication_id, schedule_id, user_telegram_id, scheduled_date.isoformat(),
                        now.isoformat(), now.isoformat()))
+            
+            logger.info(f"✅ Создано активное напоминание: med={medication_id}, sched={schedule_id}, date={scheduled_date}")
+            
     except Exception as e:
         logger.error(f"❌ Ошибка create_active_reminder: {e}")
         raise
@@ -833,11 +852,16 @@ def get_unanswered_reminders() -> List[Dict]:
             now = datetime.now(TIMEZONE)
             fifteen_min_ago = (now - timedelta(minutes=15)).isoformat()
             
+            logger.info(f"🔍 Ищем напоминания старше {fifteen_min_ago}")
+
             c.execute('''SELECT * FROM active_reminders 
                          WHERE last_reminder_time <= ? AND reminder_count < 5''',
                       (fifteen_min_ago,))
-            
+
             results = c.fetchall()
+            
+            logger.info(f"📊 Найдено неотвеченных: {len(results)}")
+            
             return [dict(row) for row in results]
     except Exception as e:
         logger.error(f"❌ Ошибка get_unanswered_reminders: {e}")
@@ -861,7 +885,7 @@ def update_active_reminder_count(reminder_id: int):
         with get_db() as conn:
             c = conn.cursor()
             now = datetime.now(TIMEZONE)
-            
+
             c.execute('''UPDATE active_reminders 
                          SET last_reminder_time = ?, reminder_count = reminder_count + 1
                          WHERE id = ?''',
@@ -3251,6 +3275,8 @@ async def send_medication_reminder(context: ContextTypes.DEFAULT_TYPE):
     reminders = c.fetchall()
     conn.close()
 
+    logger.info(f"🔔 Проверка напоминаний на {current_time}, найдено: {len(reminders)}")
+
     for reminder in reminders:
         med_id = reminder['med_id']
         user_telegram_id = reminder['telegram_id']
@@ -3284,41 +3310,47 @@ async def send_medication_reminder(context: ContextTypes.DEFAULT_TYPE):
                 weekdays_list = [int(d) for d in weekdays.split(',')]
                 should_send = current_weekday in weekdays_list
 
-        if should_send:
-            # Проверяем, не было ли уже напоминания в последние 5 минут
-            with get_db() as check_conn:
-                check_c = check_conn.cursor()
-                five_min_ago = (now - timedelta(minutes=5)).isoformat()
-                check_c.execute('''SELECT COUNT(*) as count FROM medication_logs 
-                                  WHERE medication_id = ? AND schedule_id = ? 
-                                  AND scheduled_date = ? AND created_at > ?''',
-                              (med_id, sched_id, current_date.isoformat(), five_min_ago))
+        if not should_send:
+            logger.info(f"⏭️ Пропускаем {med_name} - не подходит по расписанию")
+            continue
 
-                if check_c.fetchone()['count'] > 0:
-                    continue  # Пропускаем, уже было напоминание
+        # ✅ ИСПРАВЛЕНО: Проверяем active_reminders вместо medication_logs
+        with get_db() as check_conn:
+            check_c = check_conn.cursor()
+            check_c.execute('''SELECT COUNT(*) as count FROM active_reminders 
+                              WHERE medication_id = ? AND schedule_id = ? 
+                              AND scheduled_date = ?''',
+                          (med_id, sched_id, current_date.isoformat()))
 
-            # Отправляем напоминание
-            greeting = get_greeting_by_time()
-            nickname = get_random_nickname()
+            if check_c.fetchone()['count'] > 0:
+                logger.info(f"⏭️ Пропускаем {med_name} - активное напоминание уже существует")
+                continue
 
-            keyboard = [
-                [InlineKeyboardButton("✅ Выпила", callback_data=f"taken_{med_id}_{sched_id}_{current_date.isoformat()}")],
-                [InlineKeyboardButton("⏰ Отложить", callback_data=f"postpone_{med_id}_{sched_id}_{current_date.isoformat()}_{reminder_interval}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        # Отправляем напоминание
+        greeting = get_greeting_by_time()
+        nickname = get_random_nickname()
 
-            try:
-                await context.bot.send_message(
-                    chat_id=user_telegram_id,
-                    text=f"{greeting}, {nickname}!\n\n💊 Пора принять <b>{med_name}</b>",
-                    reply_markup=reply_markup,
-                    parse_mode='HTML'
-                )
-                
-                # Создаём активное напоминание для автоповтора
-                create_active_reminder(med_id, sched_id, user_telegram_id, current_date)
-            except Exception as e:
-                logger.error(f"Ошибка отправки напоминания: {e}")
+        keyboard = [
+            [InlineKeyboardButton("✅ Выпила", callback_data=f"taken_{med_id}_{sched_id}_{current_date.isoformat()}")],
+            [InlineKeyboardButton("⏰ Отложить", callback_data=f"postpone_{med_id}_{sched_id}_{current_date.isoformat()}_{reminder_interval}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        try:
+            await context.bot.send_message(
+                chat_id=user_telegram_id,
+                text=f"{greeting}, {nickname}!\n\n💊 Пора принять <b>{med_name}</b>",
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+            
+            logger.info(f"✅ Отправлено напоминание: {med_name} для user {user_telegram_id}")
+            
+            # Создаём активное напоминание для автоповтора
+            create_active_reminder(med_id, sched_id, user_telegram_id, current_date)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки напоминания {med_name}: {e}")
 
 async def handle_taken(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка нажатия 'Выпила'"""
@@ -3345,7 +3377,7 @@ async def handle_taken(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if med and sched:
         log_medication_taken(med_id, sched_id, scheduled_date, sched['time'])
-        
+
         # Удаляем активное напоминание (отменяем автоповтор)
         delete_active_reminder(med_id, sched_id, scheduled_date)
 
@@ -3388,7 +3420,7 @@ async def handle_postpone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if med:
         now = datetime.now(TIMEZONE)
         next_time = now + timedelta(minutes=reminder_interval)
-        
+
         # Удаляем активное напоминание (отменяем автоповтор)
         delete_active_reminder(med_id, sched_id, scheduled_date)
 
@@ -3446,46 +3478,49 @@ async def check_unanswered_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Проверка неотвеченных напоминаний для автоповтора (каждые 15 мин, макс 5 раз)"""
     reminders = get_unanswered_reminders()
     
+    logger.info(f"🔄 Проверка неотвеченных напоминаний, найдено: {len(reminders)}")
+
     for reminder in reminders:
         med = get_medication_by_id(reminder['medication_id'])
-        
+
         if not med or not med['is_active']:
+            logger.info(f"⏭️ Удаляем неактивное напоминание: med={reminder['medication_id']}")
             delete_active_reminder(reminder['medication_id'], reminder['schedule_id'], 
                                   datetime.strptime(reminder['scheduled_date'], '%Y-%m-%d').date())
             continue
-        
-        nickname = get_random_nickname()
-        greeting = get_greeting_by_time()
-        
+
         # Получаем reminder_interval из schedules
         schedules = get_medication_schedules(reminder['medication_id'])
         sched = next((s for s in schedules if s['id'] == reminder['schedule_id']), None)
         reminder_interval = sched['reminder_interval'] if sched else 60
-        
+
         keyboard = [
             [InlineKeyboardButton("✅ Выпила", callback_data=f"taken_{reminder['medication_id']}_{reminder['schedule_id']}_{reminder['scheduled_date']}")],
             [InlineKeyboardButton("⏰ Отложить", callback_data=f"postpone_{reminder['medication_id']}_{reminder['schedule_id']}_{reminder['scheduled_date']}_{reminder_interval}")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+
         count = reminder['reminder_count'] + 1
-        
+
         try:
             await context.bot.send_message(
                 chat_id=reminder['user_telegram_id'],
-                text=f"{greeting}, {nickname}!\n\n💊 Напоминаю принять <b>{med['name']}</b>\n🔔 Напоминание {count} из 5",
+                text=f"💊 Напоминаю принять <b>{med['name']}</b>\n🔔 Напоминание {count} из 5",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
             
+            logger.info(f"✅ Отправлен автоповтор #{count}: {med['name']} для user {reminder['user_telegram_id']}")
+
             # Обновляем счётчик или удаляем если достигли лимита
             if count >= 5:
+                logger.info(f"🛑 Достигнут лимит 5 напоминаний: med={reminder['medication_id']}")
                 delete_active_reminder(reminder['medication_id'], reminder['schedule_id'], 
                                       datetime.strptime(reminder['scheduled_date'], '%Y-%m-%d').date())
             else:
                 update_active_reminder_count(reminder['id'])
         except Exception as e:
-            logger.error(f"Ошибка отправки автоповтора напоминания: {e}")
+            logger.error(f"❌ Ошибка отправки автоповтора: {e}")
 
 # ============= АДМИН-ПАНЕЛЬ =============
 
@@ -4077,7 +4112,7 @@ def main():
 
     # Проверка отложенных напоминаний каждые 5 минут
     job_queue.run_repeating(check_postponed_reminders, interval=300, first=30)
-    
+
     # Проверка неотвеченных напоминаний каждые 15 минут для автоповтора
     job_queue.run_repeating(check_unanswered_reminders, interval=900, first=60)
 
