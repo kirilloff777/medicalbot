@@ -858,6 +858,7 @@ def get_unanswered_reminders() -> List[Dict]:
         with get_db() as conn:
             c = conn.cursor()
             now = datetime.now(TIMEZONE)
+            # Вычитаем 15 минут
             fifteen_min_ago = (now - timedelta(minutes=15)).isoformat()
             
             logger.info(f"🔍 Ищем напоминания старше {fifteen_min_ago}")
@@ -892,7 +893,8 @@ def update_active_reminder_count(reminder_id: int):
     try:
         with get_db() as conn:
             c = conn.cursor()
-            now = datetime.now(TIMEZONE)
+            # Убираем микросекунды для корректного сравнения
+            now = datetime.now(TIMEZONE).replace(microsecond=0)
 
             c.execute('''UPDATE active_reminders 
                          SET last_reminder_time = ?, reminder_count = reminder_count + 1
@@ -4122,7 +4124,7 @@ def main():
     job_queue.run_repeating(check_postponed_reminders, interval=300, first=30)
 
     # Проверка неотвеченных напоминаний каждые 15 минут для автоповтора
-    job_queue.run_repeating(check_unanswered_reminders, interval=900, first=60)
+    job_queue.run_repeating(check_unanswered_reminders, interval=300, first=60)
 
     # Проверка окончания курсов раз в день в 20:00
     job_queue.run_daily(check_course_endings, time=dt_time(20, 0, 0, tzinfo=TIMEZONE))
