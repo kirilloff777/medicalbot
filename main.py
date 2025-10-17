@@ -855,7 +855,7 @@ def get_unanswered_reminders() -> List[Dict]:
             logger.info(f"🔍 Ищем напоминания старше {fifteen_min_ago}")
 
             c.execute('''SELECT * FROM active_reminders 
-                         WHERE last_reminder_time <= ? AND reminder_count < 5''',
+                         WHERE last_reminder_time < ? AND reminder_count < 5''',
                       (fifteen_min_ago,))
 
             results = c.fetchall()
