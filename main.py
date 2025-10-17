@@ -660,11 +660,19 @@ def unlock_achievement(user_id: int, achievement_type: str) -> bool:
     try:
         with get_db() as conn:
             c = conn.cursor()
+            
+            # Сначала проверяем, есть ли уже это достижение
+            c.execute('''SELECT id FROM achievements 
+                         WHERE user_id = ? AND achievement_type = ?''',
+                      (user_id, achievement_type))
+            
+            if c.fetchone():
+                return False  # Достижение уже разблокировано
+            
+            # Создаём новое достижение
             c.execute('''INSERT INTO achievements (user_id, achievement_type)
                          VALUES (?, ?)''', (user_id, achievement_type))
             return True
-    except sqlite3.IntegrityError:
-        return False
     except Exception as e:
         logger.error(f"❌ Ошибка unlock_achievement: {e}")
         return False
@@ -4114,7 +4122,7 @@ def main():
     job_queue.run_repeating(check_postponed_reminders, interval=300, first=30)
 
     # Проверка неотвеченных напоминаний каждые 15 минут для автоповтора
-    job_queue.run_repeating(check_unanswered_reminders, interval=300, first=60)
+    job_queue.run_repeating(check_unanswered_reminders, interval=900, first=60)
 
     # Проверка окончания курсов раз в день в 20:00
     job_queue.run_daily(check_course_endings, time=dt_time(20, 0, 0, tzinfo=TIMEZONE))
